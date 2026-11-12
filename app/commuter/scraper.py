@@ -1,8 +1,9 @@
-"""时刻表抓取：从首页找到站点分页链接，逐页解析停站记录。
+"""分页抓取：时刻表（按站点）与到站实录（车次号 + 实际到站时间）。
 
-约定的示例网站结构（也适用于同构的真实时刻表站点）：
-  * 首页含若干 ``a.station-link``，文本为站点名，href 指向该站时刻表第 1 页；
+约定的示例网站结构（也适用于同构的真实站点）：
+  * 时刻表首页含若干 ``a.station-link``，文本为站点名，href 指向该站时刻表第 1 页；
   * 站点页含一张表格，表头出现 车次号 / 停站顺序 / 站点 / 时刻 / 服务日 等关键词；
+  * 实录首页 URL 即实录表格第 1 页，表头出现 车次号 / 实际到站时间 等关键词；
   * 页脚有 ``a.next-page`` 指向下一页；最后一页没有该链接。
 """
 
@@ -14,6 +15,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from .times import DAILY, WEEKDAY, WEEKEND, StopRecord
+from .verify import ActualRecord, parse_actual_datetime
 
 REQUEST_TIMEOUT = 10
 MAX_PAGES = 50  # 防止异常站点造成无限翻页
@@ -24,6 +26,15 @@ _HEADER_ALIASES = {
     "station": ("站点", "站名", "车站", "station", "stop"),
     "clock": ("时刻", "时间", "到时", "发时", "time", "clock"),
     "service_kind": ("服务日", "班次类型", "运行日", "类型", "service", "day"),
+}
+
+# 到站实录表格的表头别名：实录只有车次号与实际到站日期时间两列
+_LOG_HEADER_ALIASES = {
+    "trip_no": ("车次", "车次号", "班车", "trip", "bus"),
+    "actual_dt": (
+        "实际到站时间", "实际到站", "实到时间", "实到", "到站时间",
+        "到达时间", "actual", "arrived", "arrival",
+    ),
 }
 
 _KIND_MAP = {
@@ -45,11 +56,11 @@ def _norm(text: str) -> str:
     return "".join((text or "").split()).lower()
 
 
-def _header_index(headers: list[str]) -> dict[str, int]:
+def _header_index(headers: list[str], aliases: dict[str, tuple[str, ...]]) -> dict[str, int]:
     index: dict[str, int] = {}
     normed = [_norm(h) for h in headers]
-    for field_name, aliases in _HEADER_ALIASES.items():
-        for alias in aliases:
+    for field_name, names in aliases.items():
+        for alias in names:
             key = _norm(alias)
             for i, header in enumerate(normed):
                 if header and (header == key or key in header):
@@ -106,7 +117,7 @@ def scrape_station_timetable(
     """逐页抓取某站点的时刻表，返回 ``(记录列表, 错误列表)``。
 
     只要有一页抓取失败或解析不到表头，错误列表非空；
-    调用方据此提示“无法核定末班”，因为分页未取全，结论可能不成立。
+    调用方应视为分页未取全，不下任何依赖完整数据的结论。
     """
     session = session or requests.Session()
     records: list[StopRecord] = []
@@ -140,7 +151,7 @@ def scrape_station_timetable(
 
         header_row = table.find("tr")
         headers = [cell.get_text(strip=True) for cell in header_row.find_all(["th", "td"])]
-        col = _header_index(headers)
+        col = _header_index(headers, _HEADER_ALIASES)
         missing_cols = [name for name in ("trip_no", "stop_seq", "station", "clock", "service_kind")
                         if name not in col]
         if missing_cols:
@@ -165,6 +176,7 @@ def scrape_station_timetable(
                     station=cells[col["station"]].get_text(strip=True) or expected_station,
                     clock=cells[col["clock"]].get_text(strip=True),
                     service_kind=kind,
+                    source_url=url,
                 )
             )
 
@@ -175,5 +187,83 @@ def scrape_station_timetable(
         errors.append(f"分页超过 {MAX_PAGES} 页上限，时刻表可能未取全。")
         chain_broken = True
     if chain_broken:
-        errors.append("分页时刻表未完整抓取，无法核定末班，请稍后重试或联系调度。")
+        errors.append("分页时刻表未完整抓取，请修复来源后重试或联系调度。")
+    return records, errors
+
+
+def scrape_arrival_log(
+    first_page_url: str, session: requests.Session | None = None
+) -> tuple[list[ActualRecord], list[str]]:
+    """逐页抓取到站实录，返回 ``(记录列表, 错误列表)``。
+
+    实录首页 URL 即实录表格第 1 页；页面结构约定与时刻表分页相同
+    （一张表格 + ``a.next-page`` 翻页），表头需包含 车次号 与
+    实际到站时间 两列。任一分页抓取失败或记录时间无法解析时错误列表
+    非空，调用方应只展示已抓取记录与失败页，不下晚点或缺车结论。
+    """
+    session = session or requests.Session()
+    records: list[ActualRecord] = []
+    errors: list[str] = []
+    seen_urls: set[str] = set()
+    url: str | None = first_page_url
+    page_no = 0
+
+    while url and page_no < MAX_PAGES:
+        page_no += 1
+        if url in seen_urls:
+            errors.append(f"实录分页出现循环链接（{url}），实录未取全。")
+            break
+        seen_urls.add(url)
+
+        try:
+            html = _fetch(session, url)
+        except requests.RequestException as exc:
+            errors.append(f"实录第 {page_no} 页抓取失败（{url}）：{exc}")
+            break
+
+        soup = BeautifulSoup(html, "html.parser")
+        table = soup.find("table")
+        if table is None:
+            errors.append(f"实录第 {page_no} 页（{url}）找不到实录表格。")
+            break
+
+        header_row = table.find("tr")
+        headers = [cell.get_text(strip=True) for cell in header_row.find_all(["th", "td"])]
+        col = _header_index(headers, _LOG_HEADER_ALIASES)
+        missing_cols = [name for name in ("trip_no", "actual_dt") if name not in col]
+        if missing_cols:
+            errors.append(f"实录第 {page_no} 页（{url}）表头缺少必要列：{'、'.join(missing_cols)}。")
+            break
+
+        for row in table.find_all("tr")[1:]:
+            cells = row.find_all(["td", "th"])
+            if len(cells) <= max(col.values()):
+                continue
+            trip_no = cells[col["trip_no"]].get_text(strip=True)
+            if not trip_no:
+                continue
+            raw = cells[col["actual_dt"]].get_text(strip=True)
+            actual_dt = parse_actual_datetime(raw)
+            if actual_dt is None:
+                errors.append(
+                    f"实录第 {page_no} 页（{url}）车次 {trip_no} 的实际到站时间"
+                    f"「{raw}」无法解析。"
+                )
+                continue
+            records.append(
+                ActualRecord(
+                    trip_no=trip_no,
+                    actual_dt=actual_dt,
+                    raw=raw,
+                    source_url=url,
+                )
+            )
+
+        next_link = soup.select_one("a.next-page")
+        url = urljoin(url, next_link["href"]) if next_link and next_link.get("href") else None
+
+    if page_no >= MAX_PAGES and url:
+        errors.append(f"实录分页超过 {MAX_PAGES} 页上限，实录可能未取全。")
+    if errors:
+        errors.append("到站实录未完整抓取，本次不下晚点或缺车结论。")
     return records, errors

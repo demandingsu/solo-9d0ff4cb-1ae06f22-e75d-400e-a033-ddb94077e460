@@ -5,15 +5,23 @@
   * 每个站点一页表格，按页大小分页，页脚带“下一页”；
   * 含 24:xx / 25:xx 跨日时刻、工作日 / 周末 / 每日服务日；
   * N206 故意缺少中央厂区到站时刻，演示“缺少关键时刻”提示；
-  * “故障北站”第 2 页返回 500，演示分页抓取失败提示。
+  * “故障北站”第 2 页返回 500，演示分页抓取失败提示；
+  * /log/ 提供中央厂区分页到站实录（仅车次号 + 实际到站时间）：
+    - N210 在 2026-11-14 凌晨同时有「工作日 25:35」（周五始发）与
+      「周末 01:30」（周六始发）两个相邻服务日计划，实到 01:40 与两者
+      都可配对，演示“待核实”；
+    - N207 每日运行但实录中从未出现，演示“未见实到”；
+    - X999 不在时刻表中，演示“无匹配计划”；
+  * /log-broken/ 的实录第 2 页返回 500，演示实录缺页。
 """
 
 from __future__ import annotations
 
-from flask import Flask, abort, render_template_string
+from flask import Flask, abort, render_template_string, url_for
 
 app = Flask(__name__)
 PAGE_SIZE = 4
+LOG_PAGE_SIZE = 5
 
 # (车次号, 停站顺序, 站点, 时刻, 服务日)
 TRIPS: list[tuple[str, int, str, str, str]] = [
@@ -47,6 +55,23 @@ TRIPS: list[tuple[str, int, str, str, str]] = [
     ("N206", 2, "东门枢纽", "25:55", "每日"),
     ("N206", 4, "夜班宿舍", "27:10", "每日"),
 
+    # N207 每日运行，但实录中从未出现：演示“未见实到”
+    ("N207", 1, "滨河园区", "26:30", "每日"),
+    ("N207", 2, "东门枢纽", "26:55", "每日"),
+    ("N207", 3, "中央厂区", "27:15", "每日"),
+    ("N207", 4, "夜班宿舍", "27:45", "每日"),
+
+    # N210 同号两套时刻：工作日深夜与周末凌晨的相邻服务日计划可落在同一凌晨，
+    # 与一条实到同时配对，演示“待核实”
+    ("N210", 1, "滨河园区", "23:45", "工作日"),
+    ("N210", 2, "东门枢纽", "24:10", "工作日"),
+    ("N210", 3, "中央厂区", "25:35", "工作日"),
+    ("N210", 4, "夜班宿舍", "26:00", "工作日"),
+    ("N210", 1, "滨河园区", "00:20", "周末"),
+    ("N210", 2, "东门枢纽", "00:50", "周末"),
+    ("N210", 3, "中央厂区", "01:30", "周末"),
+    ("N210", 4, "夜班宿舍", "02:00", "周末"),
+
     # 故障北站的记录：访问其第 2 页时返回 500
     ("X901", 1, "故障北站", "22:10", "每日"),
     ("X901", 2, "中央厂区", "23:00", "每日"),
@@ -60,12 +85,30 @@ TRIPS: list[tuple[str, int, str, str, str]] = [
     ("X905", 2, "中央厂区", "27:35", "每日"),
 ]
 
+# 中央厂区到站实录：(车次号, 实际到站时间)，覆盖 2026-11-12 / 11-14 / 11-15
+LOG_ENTRIES: list[tuple[str, str]] = [
+    ("N202", "2026-11-12 00:30"),
+    ("N210", "2026-11-12 01:33"),
+    ("N205", "2026-11-12 01:40"),
+    ("N203", "2026-11-12 02:20"),
+    ("X999", "2026-11-12 03:10"),
+    ("N201", "2026-11-12 23:44"),
+    ("N202", "2026-11-14 00:28"),
+    ("N210", "2026-11-14 01:40"),
+    ("N205", "2026-11-14 01:47"),
+    ("N202", "2026-11-15 00:26"),
+    ("N210", "2026-11-15 01:28"),
+    ("N205", "2026-11-15 01:55"),
+    ("N204", "2026-11-15 02:40"),
+]
+
 STATIONS = sorted({row[2] for row in TRIPS})
 
 HOME_HTML = """
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <title>示例夜班接驳时刻表</title>
-<style>body{font-family:sans-serif;margin:32px;} li{margin:6px;}</style></head>
+<style>body{font-family:sans-serif;margin:32px;} li{margin:6px;}
+.muted{color:#667085;font-size:13px;}</style></head>
 <body><h1>示例夜班接驳时刻表（首页）</h1>
 <p>点击站点进入该站分页时刻表：</p>
 <ul>
@@ -73,7 +116,15 @@ HOME_HTML = """
   <li><a class="station-link" href="{{ url_for('station', station=s, page=1) }}">{{ s }}</a></li>
 {% endfor %}
 </ul>
+<h2>到站实录（中央厂区）</h2>
+<ul>
+  <li><a href="{{ url_for('log') }}">到站实录首页</a>（正常分页，含跨日同号班次）</li>
+  <li><a href="{{ url_for('log_broken') }}">到站实录首页 · 缺页演示</a>（第 2 页返回 500）</li>
+</ul>
 <p class="muted">提示：「故障北站」第 2 页会返回 HTTP 500，用于演示抓取失败提示。</p>
+<p class="muted">实录覆盖到站日期 2026-11-12 / 11-14 / 11-15；其中 N210 在 2026-11-14
+凌晨同时存在「工作日 25:35」（周五始发）与「周末 01:30」（周六始发）两个相邻服务日计划，
+实到 01:40 与两者都可配对，用于演示“待核实”。</p>
 </body></html>
 """
 
@@ -102,6 +153,30 @@ table{border-collapse:collapse;} th,td{border:1px solid #888;padding:6px 12px;}
 """
 
 
+LOG_HTML = """
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>中央厂区 到站实录 第 {{ page }} 页</title>
+<style>body{font-family:sans-serif;margin:32px;}
+table{border-collapse:collapse;} th,td{border:1px solid #888;padding:6px 12px;}
+.nav{margin-top:14px;} .muted{color:#667085;font-size:13px;}</style></head>
+<body>
+<h1>中央厂区 · 接驳车到站实录（第 {{ page }} / {{ total_pages }} 页）</h1>
+<p class="muted">实录仅含车次号与实际到站时间。</p>
+<table>
+  <tr><th>车次号</th><th>实际到站时间</th></tr>
+  {% for trip_no, at in rows %}<tr><td>{{ trip_no }}</td><td>{{ at }}</td></tr>{% endfor %}
+</table>
+<div class="nav">
+  {% if page > 1 %}<a href="{{ first_url }}">首页</a>{% endif %}
+  {% if page < total_pages %}
+    <a class="next-page" href="{{ next_url }}">下一页 →</a>
+  {% endif %}
+  <p><a href="{{ url_for('home') }}">返回首页</a></p>
+</div>
+</body></html>
+"""
+
+
 @app.route("/")
 def home():
     return render_template_string(HOME_HTML, stations=STATIONS)
@@ -122,6 +197,44 @@ def station(station: str, page: int):
     return render_template_string(
         PAGE_HTML, station=station, page=page, total_pages=total_pages, rows=chunk
     )
+
+
+def _render_log(page: int, broken: bool):
+    total_pages = (len(LOG_ENTRIES) + LOG_PAGE_SIZE - 1) // LOG_PAGE_SIZE
+    if page < 1 or page > total_pages:
+        abort(404)
+    if broken and page >= 2:
+        abort(500, description="演示用：实录分页服务器临时故障")
+    chunk = LOG_ENTRIES[(page - 1) * LOG_PAGE_SIZE: page * LOG_PAGE_SIZE]
+    prefix = "log_broken" if broken else "log"
+    return render_template_string(
+        LOG_HTML,
+        page=page,
+        total_pages=total_pages,
+        rows=chunk,
+        first_url=url_for(prefix),
+        next_url=url_for(f"{prefix}_page", page=page + 1) if page < total_pages else None,
+    )
+
+
+@app.route("/log/")
+def log():
+    return _render_log(1, broken=False)
+
+
+@app.route("/log/page-<int:page>")
+def log_page(page: int):
+    return _render_log(page, broken=False)
+
+
+@app.route("/log-broken/")
+def log_broken():
+    return _render_log(1, broken=True)
+
+
+@app.route("/log-broken/page-<int:page>")
+def log_broken_page(page: int):
+    return _render_log(page, broken=True)
 
 
 if __name__ == "__main__":

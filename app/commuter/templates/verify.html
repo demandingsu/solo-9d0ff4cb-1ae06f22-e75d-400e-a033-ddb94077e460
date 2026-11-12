@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>接驳车到站实到核对</title>
+  <style>
+    :root { --ink:#1f2933; --muted:#667085; --brand:#1d4ed8; --ok-bg:#ecfdf3;
+            --ok-bd:#12b76a; --warn-bg:#fffaeb; --warn-bd:#f79009;
+            --err-bg:#fef3f2; --err-bd:#f04438; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: "PingFang SC","Microsoft YaHei","Noto Sans CJK SC",
+           system-ui, sans-serif; color:var(--ink); background:#f5f7fb; }
+    header { background:var(--brand); color:#fff; padding:20px 28px; }
+    header h1 { margin:0; font-size:20px; }
+    header p { margin:6px 0 0; font-size:13px; opacity:.85; }
+    header a { color:#fff; text-decoration:underline; }
+    main { max-width:1080px; margin:24px auto; padding:0 16px; }
+    .card { background:#fff; border:1px solid #e4e7ec; border-radius:10px;
+            padding:20px 24px; margin-bottom:20px; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px 18px; }
+    .grid .full { grid-column: 1 / -1; }
+    label { display:block; font-size:13px; font-weight:600; margin-bottom:6px; }
+    input { width:100%; padding:9px 10px; border:1px solid #d0d5dd; border-radius:8px;
+            font-size:14px; }
+    input:focus { outline:2px solid #b2ccff; border-color:var(--brand); }
+    button { margin-top:16px; background:var(--brand); color:#fff; border:0;
+             padding:10px 26px; border-radius:8px; font-size:15px; cursor:pointer; }
+    button:hover { background:#1e40af; }
+    .banner { border-radius:8px; padding:12px 16px; margin-bottom:16px; font-size:14px;
+              border:1px solid; }
+    .banner.err { background:var(--err-bg); border-color:var(--err-bd); }
+    .banner.warn { background:var(--warn-bg); border-color:var(--warn-bd); }
+    .banner.ok { background:var(--ok-bg); border-color:var(--ok-bd); }
+    .banner ul { margin:6px 0 0 18px; padding:0; }
+    table { width:100%; border-collapse:collapse; font-size:13px; margin-top:8px; }
+    th, td { border:1px solid #e4e7ec; padding:7px 9px; text-align:left;
+             vertical-align:top; }
+    th { background:#f9fafb; }
+    code { background:#f2f4f7; padding:1px 6px; border-radius:4px; font-size:12px; }
+    .muted { color:var(--muted); font-size:12px; }
+    .late { color:#b42318; font-weight:600; }
+    .early { color:#027a48; font-weight:600; }
+    ul.cand { margin:0; padding-left:18px; }
+    h2 { font-size:16px; margin:18px 0 10px; }
+    a { color:var(--brand); word-break:break-all; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>接驳车到站实到核对</h1>
+  <p>按两站停站顺序与始发服务日还原计划到站，与实录一对一配对，找出可确认的晚点班次。
+     <a href="/">→ 末班核定</a></p>
+</header>
+<main>
+  {% if errors %}
+  <div class="banner err">
+    <strong>⚠ 无法核对</strong>
+    <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  {% if scrape_errors %}
+  <div class="banner err">
+    <strong>⚠ 来源抓取不完整，本次不下晚点或缺车结论</strong>
+    <ul>{% for e in scrape_errors %}<li>{{ e }}</li>{% endfor %}</ul>
+    <p style="margin:8px 0 0">以下仅展示已抓取的记录与失败页，请修复来源后重新核对。</p>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <form method="post" novalidate>
+      <div class="grid">
+        <div class="full">
+          <label for="home_url">时刻表首页 URL</label>
+          <input id="home_url" name="home_url" type="url" required
+                 placeholder="例如 http://localhost:5001/" value="{{ form.home_url }}">
+        </div>
+        <div class="full">
+          <label for="log_url">实录首页 URL（下车站到站实录的第 1 页）</label>
+          <input id="log_url" name="log_url" type="url" required
+                 placeholder="例如 http://localhost:5001/log/" value="{{ form.log_url }}">
+        </div>
+        <div>
+          <label for="board_station">上车站</label>
+          <input id="board_station" name="board_station" required
+                 value="{{ form.board_station }}" placeholder="例如 滨河园区">
+        </div>
+        <div>
+          <label for="alight_station">下车站（实录所属站）</label>
+          <input id="alight_station" name="alight_station" required
+                 value="{{ form.alight_station }}" placeholder="例如 中央厂区">
+        </div>
+        <div>
+          <label for="verify_date">实际到站日期</label>
+          <input id="verify_date" name="verify_date" type="date" required
+                 value="{{ form.verify_date }}">
+        </div>
+      </div>
+      <button type="submit">核对实到</button>
+      <p class="muted">实到允许比计划早 15 分钟至晚 120 分钟；存在多种配对可能的记录标记“待核实”，不按页面顺序任选一条。</p>
+    </form>
+  </div>
+
+  {% if result %}
+  <div class="card">
+    <div class="banner ok">
+      核对完成（{{ form.verify_date }}）：确定配对 {{ result.confirmed|length }} 条
+      （晚点 {{ late_count }} 条、提前 {{ early_count }} 条）；
+      待核实：实录 {{ result.ambiguous_actuals|length }} 条、计划 {{ result.ambiguous_plans|length }} 个；
+      未见实到 {{ result.unmatched_plans|length }} 班；
+      无匹配计划 {{ result.unmatched_actuals|length }} 条。
+    </div>
+
+    {% if result.problems %}
+    <div class="banner warn">
+      <strong>数据告警（以下车次未能还原计划到站，未参与配对）</strong>
+      <ul>{% for w in result.problems %}<li>{{ w }}</li>{% endfor %}</ul>
+    </div>
+    {% endif %}
+
+    {% if result.ambiguous_actuals or result.ambiguous_plans %}
+    <div class="banner warn">
+      <strong>待核实：以下记录存在多种配对可能，需人工核实（系统不按页面顺序任选一条）</strong>
+    </div>
+    {% endif %}
+
+    {% if result.confirmed %}
+    <h2>确定配对（按计划到站时间排序）</h2>
+    <table>
+      <tr><th>车次号</th><th>服务日</th><th>计划到站</th><th>实到时间</th>
+          <th>核对结果</th><th>时刻表来源</th><th>实录来源</th></tr>
+      {% for c in result.confirmed %}
+      <tr>
+        <td>{{ c.planned.trip_no }}</td>
+        <td>{{ service_labels[c.planned.service_kind] }} ·
+            {{ c.planned.service_day.strftime('%Y-%m-%d') }}</td>
+        <td>{{ c.planned.planned_dt.strftime('%Y-%m-%d %H:%M') }}
+            （时刻表 <code>{{ c.planned.alight_clock }}</code>）</td>
+        <td>{{ c.actual.actual_dt.strftime('%Y-%m-%d %H:%M') }}</td>
+        <td>
+          {% if c.delay_minutes > 0 %}<span class="late">晚点 {{ c.delay_minutes }} 分钟</span>
+          {% elif c.delay_minutes < 0 %}<span class="early">提前 {{ -c.delay_minutes }} 分钟</span>
+          {% else %}正点{% endif %}
+        </td>
+        <td><a href="{{ c.planned.alight_source }}" target="_blank">下车站页</a>
+            <a href="{{ c.planned.board_source }}" target="_blank">上车站页</a></td>
+        <td><a href="{{ c.actual.source_url }}" target="_blank">实录页</a></td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+
+    {% if result.ambiguous_actuals %}
+    <h2>待核实 · 实录记录（一条实到可配多个计划）</h2>
+    <table>
+      <tr><th>车次号</th><th>实到时间</th><th>实录来源</th><th>候选计划到站</th></tr>
+      {% for aa in result.ambiguous_actuals %}
+      <tr>
+        <td>{{ aa.actual.trip_no }}</td>
+        <td>{{ aa.actual.actual_dt.strftime('%Y-%m-%d %H:%M') }}</td>
+        <td><a href="{{ aa.actual.source_url }}" target="_blank">实录页</a></td>
+        <td>
+          <ul class="cand">
+            {% for p in aa.candidates %}
+            <li>{{ p.planned_dt.strftime('%Y-%m-%d %H:%M') }}
+                （{{ service_labels[p.service_kind] }}班次，始发服务日
+                {{ p.service_day.strftime('%Y-%m-%d') }}，时刻表 <code>{{ p.alight_clock }}</code>，
+                <a href="{{ p.alight_source }}" target="_blank">来源</a>）</li>
+            {% endfor %}
+          </ul>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+
+    {% if result.ambiguous_plans %}
+    <h2>待核实 · 计划班次（一个计划可配多条实到）</h2>
+    <table>
+      <tr><th>车次号</th><th>计划到站</th><th>服务日</th><th>时刻表来源</th><th>候选实到</th></tr>
+      {% for ap in result.ambiguous_plans %}
+      <tr>
+        <td>{{ ap.planned.trip_no }}</td>
+        <td>{{ ap.planned.planned_dt.strftime('%Y-%m-%d %H:%M') }}
+            （时刻表 <code>{{ ap.planned.alight_clock }}</code>）</td>
+        <td>{{ service_labels[ap.planned.service_kind] }} ·
+            {{ ap.planned.service_day.strftime('%Y-%m-%d') }}</td>
+        <td><a href="{{ ap.planned.alight_source }}" target="_blank">下车站页</a></td>
+        <td>
+          <ul class="cand">
+            {% for a in ap.candidates %}
+            <li>{{ a.actual_dt.strftime('%Y-%m-%d %H:%M') }}
+                （<a href="{{ a.source_url }}" target="_blank">实录页</a>）</li>
+            {% endfor %}
+          </ul>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+
+    {% if result.unmatched_plans %}
+    <h2>未见实到记录的计划班次（可能缺车，请查因）</h2>
+    <table>
+      <tr><th>车次号</th><th>服务日</th><th>计划到站</th><th>时刻表来源</th></tr>
+      {% for p in result.unmatched_plans %}
+      <tr>
+        <td>{{ p.trip_no }}</td>
+        <td>{{ service_labels[p.service_kind] }} · {{ p.service_day.strftime('%Y-%m-%d') }}</td>
+        <td>{{ p.planned_dt.strftime('%Y-%m-%d %H:%M') }}
+            （时刻表 <code>{{ p.alight_clock }}</code>）</td>
+        <td><a href="{{ p.alight_source }}" target="_blank">下车站页</a>
+            <a href="{{ p.board_source }}" target="_blank">上车站页</a></td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+
+    {% if result.unmatched_actuals %}
+    <h2>无匹配计划的实录记录（计划外或数据异常）</h2>
+    <table>
+      <tr><th>车次号</th><th>实到时间</th><th>实录来源</th></tr>
+      {% for a in result.unmatched_actuals %}
+      <tr>
+        <td>{{ a.trip_no }}</td>
+        <td>{{ a.actual_dt.strftime('%Y-%m-%d %H:%M') }}</td>
+        <td><a href="{{ a.source_url }}" target="_blank">实录页</a></td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if scrape_errors %}
+  <div class="card">
+    <h2>已抓取的时刻表记录（{{ board_records|length + alight_records|length }} 条）</h2>
+    {% if board_records or alight_records %}
+    <table>
+      <tr><th>车次号</th><th>停站顺序</th><th>站点</th><th>时刻</th><th>服务日</th><th>来源页</th></tr>
+      {% for r in board_records + alight_records %}
+      <tr>
+        <td>{{ r.trip_no }}</td>
+        <td>{{ r.stop_seq if r.stop_seq is not none else '—' }}</td>
+        <td>{{ r.station }}</td>
+        <td><code>{{ r.clock }}</code></td>
+        <td>{{ service_labels.get(r.service_kind, r.service_kind) }}</td>
+        <td><a href="{{ r.source_url }}" target="_blank">来源</a></td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <p class="muted">（未抓取到任何时刻表记录）</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>已抓取的实录记录（{{ actual_records|length }} 条）</h2>
+    {% if actual_records %}
+    <table>
+      <tr><th>车次号</th><th>实际到站时间</th><th>来源页</th></tr>
+      {% for a in actual_records %}
+      <tr>
+        <td>{{ a.trip_no }}</td>
+        <td>{{ a.actual_dt.strftime('%Y-%m-%d %H:%M') }}</td>
+        <td><a href="{{ a.source_url }}" target="_blank">来源</a></td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <p class="muted">（未抓取到任何实录记录）</p>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <p class="muted">页面生成时间：{{ now }}</p>
+</main>
+</body>
+</html>

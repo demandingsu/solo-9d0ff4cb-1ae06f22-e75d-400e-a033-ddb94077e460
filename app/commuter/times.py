@@ -62,6 +62,7 @@ class StopRecord:
     station: str
     clock: str          # 原始时刻文本，如 "24:30"
     service_kind: str   # weekday / weekend / daily
+    source_url: str = ""  # 抓取到该记录的分页地址（用于结果溯源）
 
     def clock_delta(self) -> timedelta | None:
         return parse_clock(self.clock)

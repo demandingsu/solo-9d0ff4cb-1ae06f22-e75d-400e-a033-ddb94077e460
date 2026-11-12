@@ -7,8 +7,9 @@ from datetime import datetime
 import requests
 from flask import Flask, render_template, request
 
-from .scraper import find_station_url, scrape_station_timetable
+from .scraper import find_station_url, scrape_arrival_log, scrape_station_timetable
 from .times import SERVICE_LABELS, determine_last_trip
+from .verify import verify_arrivals
 
 app = Flask(__name__)
 
@@ -113,6 +114,93 @@ def index():
         determination=determination,
         board_source=board_source,
         alight_source=alight_source,
+        service_labels=SERVICE_LABELS,
+        now=datetime.now().strftime("%Y-%m-%d %H:%M"),
+    )
+
+
+@app.route("/verify", methods=["GET", "POST"])
+def verify():
+    """实到核对：把某站某日的到站实录与还原出的计划到站一对一配对。"""
+    form = {
+        "home_url": "",
+        "log_url": "",
+        "board_station": "",
+        "alight_station": "",
+        "verify_date": "",
+    }
+    errors: list[str] = []          # 表单校验问题
+    scrape_errors: list[str] = []   # 来源缺页 / 抓取失败：只展示已抓取记录，不下结论
+    result = None
+    board_records: list = []
+    alight_records: list = []
+    actual_records: list = []
+
+    if request.method == "POST":
+        form.update({key: request.form.get(key, "").strip() for key in form})
+
+        required = [
+            ("home_url", "时刻表首页 URL"),
+            ("log_url", "实录首页 URL"),
+            ("board_station", "上车站"),
+            ("alight_station", "下车站"),
+            ("verify_date", "实际到站日期"),
+        ]
+        for key, label in required:
+            if not form[key]:
+                errors.append(f"请填写{label}。")
+
+        verify_date = None
+        if not errors:
+            try:
+                verify_date = datetime.strptime(form["verify_date"], "%Y-%m-%d").date()
+            except ValueError:
+                errors.append("实际到站日期格式无效，请通过日期选择器填写。")
+            if form["board_station"] == form["alight_station"]:
+                errors.append("上车站与下车站不能相同。")
+
+        if not errors:
+            session = requests.Session()
+            try:
+                board_url = find_station_url(form["home_url"], form["board_station"], session)
+                alight_url = find_station_url(form["home_url"], form["alight_station"], session)
+            except (requests.RequestException, LookupError) as exc:
+                scrape_errors.append(f"读取时刻表首页失败：{exc}")
+            else:
+                board_records, errs = scrape_station_timetable(
+                    board_url, form["board_station"], session
+                )
+                scrape_errors.extend(errs)
+                alight_records, errs = scrape_station_timetable(
+                    alight_url, form["alight_station"], session
+                )
+                scrape_errors.extend(errs)
+                actual_records, errs = scrape_arrival_log(form["log_url"], session)
+                scrape_errors.extend(errs)
+
+            if not scrape_errors:
+                # 两个来源的分页都抓齐了，才允许下晚点 / 缺车结论
+                result = verify_arrivals(
+                    board_records,
+                    alight_records,
+                    actual_records,
+                    form["board_station"],
+                    form["alight_station"],
+                    verify_date,
+                )
+
+    confirmed = result.confirmed if result else []
+    return render_template(
+        "verify.html",
+        form=form,
+        errors=errors,
+        scrape_errors=scrape_errors,
+        result=result,
+        board_records=board_records,
+        alight_records=alight_records,
+        actual_records=actual_records,
+        late_count=sum(1 for c in confirmed if c.delay_minutes > 0),
+        early_count=sum(1 for c in confirmed if c.delay_minutes < 0),
         service_labels=SERVICE_LABELS,
         now=datetime.now().strftime("%Y-%m-%d %H:%M"),
     )
