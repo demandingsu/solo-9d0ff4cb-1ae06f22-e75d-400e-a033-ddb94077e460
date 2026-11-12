@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>夜班接驳车末班核定</title>
+  <style>
+    :root { --ink:#1f2933; --muted:#667085; --brand:#1d4ed8; --ok-bg:#ecfdf3;
+            --ok-bd:#12b76a; --warn-bg:#fffaeb; --warn-bd:#f79009;
+            --err-bg:#fef3f2; --err-bd:#f04438; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: "PingFang SC","Microsoft YaHei","Noto Sans CJK SC",
+           system-ui, sans-serif; color:var(--ink); background:#f5f7fb; }
+    header { background:var(--brand); color:#fff; padding:20px 28px; }
+    header h1 { margin:0; font-size:20px; }
+    header p { margin:6px 0 0; font-size:13px; opacity:.85; }
+    main { max-width:980px; margin:24px auto; padding:0 16px; }
+    .card { background:#fff; border:1px solid #e4e7ec; border-radius:10px;
+            padding:20px 24px; margin-bottom:20px; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px 18px; }
+    .grid .full { grid-column: 1 / -1; }
+    label { display:block; font-size:13px; font-weight:600; margin-bottom:6px; }
+    input { width:100%; padding:9px 10px; border:1px solid #d0d5dd; border-radius:8px;
+            font-size:14px; }
+    input:focus { outline:2px solid #b2ccff; border-color:var(--brand); }
+    button { margin-top:16px; background:var(--brand); color:#fff; border:0;
+             padding:10px 26px; border-radius:8px; font-size:15px; cursor:pointer; }
+    button:hover { background:#1e40af; }
+    .banner { border-radius:8px; padding:12px 16px; margin-bottom:16px; font-size:14px;
+              border:1px solid; }
+    .banner.err { background:var(--err-bg); border-color:var(--err-bd); }
+    .banner.warn { background:var(--warn-bg); border-color:var(--warn-bd); }
+    .banner.ok { background:var(--ok-bg); border-color:var(--ok-bd); }
+    .banner ul { margin:6px 0 0 18px; padding:0; }
+    .answer { font-size:16px; line-height:1.9; }
+    .answer .trip { font-size:26px; font-weight:700; color:var(--brand); }
+    table { width:100%; border-collapse:collapse; font-size:13px; margin-top:8px; }
+    th, td { border:1px solid #e4e7ec; padding:7px 9px; text-align:left; }
+    th { background:#f9fafb; }
+    code { background:#f2f4f7; padding:1px 6px; border-radius:4px; font-size:12px; }
+    .muted { color:var(--muted); font-size:12px; }
+    h2 { font-size:16px; margin:0 0 10px; }
+    a { color:var(--brand); word-break:break-all; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>夜班接驳车末班核定</h1>
+  <p>输入两站与时间窗，自动翻页抓取两站时刻表，按车次号与停站顺序配对，给出还能准时到岗的最晚一班。</p>
+</header>
+<main>
+  {% if errors %}
+  <div class="banner err">
+    <strong>⚠ 无法核定末班</strong>
+    <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  {% if warnings %}
+  <div class="banner warn">
+    <strong>数据告警（以下车次未参与核定，末班结论基于其余完整数据）</strong>
+    <ul>{% for w in warnings %}<li>{{ w }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <form method="post" novalidate>
+      <div class="grid">
+        <div class="full">
+          <label for="home_url">时刻表首页 URL</label>
+          <input id="home_url" name="home_url" type="url" required
+                 placeholder="例如 http://localhost:5001/" value="{{ form.home_url }}">
+        </div>
+        <div>
+          <label for="board_station">上车站</label>
+          <input id="board_station" name="board_station" required
+                 value="{{ form.board_station }}" placeholder="例如 滨河园区">
+        </div>
+        <div>
+          <label for="alight_station">下车站</label>
+          <input id="alight_station" name="alight_station" required
+                 value="{{ form.alight_station }}" placeholder="例如 中央厂区">
+        </div>
+        <div>
+          <label for="earliest_depart">最早出门日期时间</label>
+          <input id="earliest_depart" name="earliest_depart" type="datetime-local" required
+                 value="{{ form.earliest_depart }}">
+        </div>
+        <div>
+          <label for="latest_arrive">到岗截止日期时间</label>
+          <input id="latest_arrive" name="latest_arrive" type="datetime-local" required
+                 value="{{ form.latest_arrive }}">
+        </div>
+      </div>
+      <button type="submit">核定末班车</button>
+      <p class="muted">服务日按车次始发日区分工作日 / 周末；24:xx 为跨日时刻，自动换算为次日实际时间。</p>
+    </form>
+  </div>
+
+  {% if determination and determination.latest %}
+  {% set opt = determination.latest %}
+  <div class="card">
+    <div class="banner ok">
+      <div class="answer">
+        最晚可乘坐 <span class="trip">{{ opt.trip_no }}</span>
+        （{{ service_labels[opt.service_kind] }}班次，始发服务日
+        {{ opt.service_day.strftime('%Y-%m-%d') }}）<br>
+        在 <strong>{{ form.board_station }}</strong> 发车：
+        <strong>{{ opt.depart_dt.strftime('%Y-%m-%d %H:%M') }}</strong>
+        （时刻表时刻 <code>{{ opt.depart_clock }}</code>，停站顺序 {{ opt.board_seq }}）<br>
+        到达 <strong>{{ form.alight_station }}</strong>：
+        <strong>{{ opt.arrive_dt.strftime('%Y-%m-%d %H:%M') }}</strong>
+        （时刻表时刻 <code>{{ opt.arrive_clock }}</code>，停站顺序 {{ opt.alight_seq }}）
+      </div>
+    </div>
+
+    <h2>两站来源（分页时刻表第 1 页地址）</h2>
+    <table>
+      <tr><th>上车站来源</th><td><a href="{{ board_source }}" target="_blank">{{ board_source }}</a></td></tr>
+      <tr><th>下车站来源</th><td><a href="{{ alight_source }}" target="_blank">{{ alight_source }}</a></td></tr>
+    </table>
+
+    <h2 style="margin-top:18px">时间窗内全部可选班次（按发车从晚到早）</h2>
+    <table>
+      <tr><th>车次号</th><th>服务日类型</th><th>始发服务日</th>
+          <th>{{ form.board_station }} 发车</th><th>{{ form.alight_station }} 到站</th></tr>
+      {% for o in determination.options %}
+      <tr>
+        <td>{{ o.trip_no }}</td>
+        <td>{{ service_labels[o.service_kind] }}</td>
+        <td>{{ o.service_day.strftime('%Y-%m-%d') }}</td>
+        <td>{{ o.depart_dt.strftime('%Y-%m-%d %H:%M') }}（<code>{{ o.depart_clock }}</code>）</td>
+        <td>{{ o.arrive_dt.strftime('%Y-%m-%d %H:%M') }}（<code>{{ o.arrive_clock }}</code>）</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% elif request.method == 'POST' and not errors %}
+  <div class="banner warn"><strong>未找到符合条件的班次。</strong></div>
+  {% endif %}
+
+  <p class="muted">页面生成时间：{{ now }}</p>
+</main>
+</body>
+</html>
